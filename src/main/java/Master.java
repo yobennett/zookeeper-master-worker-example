@@ -7,11 +7,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Random;
 
-import static org.apache.zookeeper.AsyncCallback.StatCallback;
-import static org.apache.zookeeper.AsyncCallback.DataCallback;
-import static org.apache.zookeeper.AsyncCallback.StringCallback;
+import static org.apache.zookeeper.AsyncCallback.*;
 import static org.apache.zookeeper.CreateMode.EPHEMERAL;
 import static org.apache.zookeeper.CreateMode.PERSISTENT;
 import static org.apache.zookeeper.KeeperException.*;
@@ -26,9 +25,10 @@ public class Master implements Watcher {
     ZooKeeper zk;
     String hostPort;
     String serverId;
-    boolean connected;
-    boolean expired;
+    private volatile boolean connected;
+    private volatile boolean expired;
     private volatile MasterStates state;
+    ChildrenCache workersCache;
 
     /*
      * A master process can be either running for
@@ -126,6 +126,43 @@ public class Master implements Watcher {
         }
     };
 
+    ChildrenCallback workersGetChildrenCallback = new ChildrenCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, List<String> children) {
+            switch(Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    getWorkers();
+                    break;
+                case OK:
+                    LOGGER.info("Success. Got list of workers: " + children.size() + " workers");
+                    reassignAndSet(children);
+                    break;
+                default:
+                    LOGGER.error("Unable to get children.", KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };
+
+    ChildrenCallback workerAssignmentCallback = new ChildrenCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, List<String> children) {
+            switch(Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    getAbsentWorkerTasks(path);
+                    break;
+                case OK:
+                    LOGGER.info("Success. Got list of assignments: " + children.size() + " tasks for " + path);
+                    // reassign each task for the absent worker
+                    for (String task : children) {
+                        //getDataReassign(path + "/" + task, task);
+                    }
+                    break;
+                default:
+                    LOGGER.error("Unable to get children assignments.", KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };
+
     // watchers
 
     Watcher masterExistsWatcher = new Watcher() {
@@ -134,6 +171,16 @@ public class Master implements Watcher {
             if (e.getType() == Event.EventType.NodeDeleted) {
                 assert MASTER_PATH.equals(e.getPath());
                 runForMaster();
+            }
+        }
+    };
+
+    Watcher workersChangeWatcher = new Watcher() {
+        @Override
+        public void process(WatchedEvent e) {
+            if (e.getType() == Event.EventType.NodeChildrenChanged) {
+                assert Worker.WORKERS_PATH_PREFIX.equals(e.getPath());
+                getWorkers();
             }
         }
     };
@@ -209,6 +256,31 @@ public class Master implements Watcher {
 
     boolean isExpired() {
         return expired;
+    }
+
+    void getWorkers() {
+        zk.getChildren(Worker.WORKERS_PATH_PREFIX, workersChangeWatcher, workersGetChildrenCallback, null);
+    }
+
+    void reassignAndSet(List<String> children) {
+        List<String> toProcess;
+        if (workersCache == null) {
+            workersCache = new ChildrenCache(children);
+            toProcess = null;
+        } else {
+            toProcess = workersCache.removeAndSet(children);
+        }
+
+        if (toProcess != null) {
+            // get tasks for all absent workers
+            for (String worker : toProcess) {
+                getAbsentWorkerTasks(worker);
+            }
+        }
+    }
+
+    void getAbsentWorkerTasks(String worker) {
+        zk.getChildren("/assign/" + worker, false, workerAssignmentCallback, null);
     }
 
     public static void main(String[] args) throws Exception {

@@ -18,7 +18,7 @@ import static org.apache.zookeeper.ZooDefs.Ids.OPEN_ACL_UNSAFE;
 public class Worker implements Watcher {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Worker.class);
-    private static String WORKERS_PATH_PREFIX = "/workers";
+    public static String WORKERS_PATH_PREFIX = "/workers";
     private static String WORKER = "worker";
     private static String IDLE = "Idle";
 
