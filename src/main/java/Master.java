@@ -163,6 +163,85 @@ public class Master implements Watcher {
         }
     };
 
+    ChildrenCallback tasksGetChildrenCallback = new ChildrenCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, List<String> children) {
+            switch (Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    getTasks();
+                    break;
+                case OK:
+                    if (children != null) {
+                        assignTasks(children);
+                    }
+                    break;
+                default:
+                    LOGGER.error("Unable to get children tasks.", KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };
+
+    DataCallback taskDataCallback = new DataCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, byte[] data, Stat stat) {
+            switch (Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    getTaskData((String) ctx);
+                    break;
+                case OK:
+                    // choose random worker
+                    List<String> list = workersCache.getList();
+                    String worker = list.get(new Random().nextInt(list.size()));
+                    // assign task to randomly chosen worker
+                    String assignmentPath = "/assign/" + worker + "/" + (String) ctx;
+                    createAssignment(assignmentPath, data);
+                    break;
+                default:
+                    LOGGER.error("Unable to get task data.", KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };
+
+    StringCallback assignTaskCallback = new StringCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, String name) {
+            switch(Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    createAssignment(path, (byte[]) ctx);
+                    break;
+                case OK:
+                    LOGGER.info("Task assigned: " + name);
+                    String taskName = name.substring(name.lastIndexOf("/" + 1));
+                    deleteTask(taskName);
+                    break;
+                case NODEEXISTS:
+                    LOGGER.warn("Already assigned: " + name);
+                    break;
+                default:
+                    LOGGER.error("Unable to assign task.", KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };
+
+    VoidCallback taskDeleteCallback = new VoidCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx) {
+            switch (Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    deleteTask(path);
+                    break;
+                case OK:
+                    LOGGER.info("Task deleted: " + path);
+                    break;
+                case NONODE:
+                    LOGGER.warn("Task already deleted: " + path);
+                    break;
+                default:
+                    LOGGER.error("Unable to delete task.", KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };
+
     // watchers
 
     Watcher masterExistsWatcher = new Watcher() {
@@ -181,6 +260,16 @@ public class Master implements Watcher {
             if (e.getType() == Event.EventType.NodeChildrenChanged) {
                 assert Worker.WORKERS_PATH_PREFIX.equals(e.getPath());
                 getWorkers();
+            }
+        }
+    };
+
+    Watcher tasksChangeWatcher = new Watcher() {
+        @Override
+        public void process(WatchedEvent e) {
+            if (e.getType() == Event.EventType.NodeChildrenChanged) {
+                assert "/tasks".equals(e.getPath());
+                getTasks();
             }
         }
     };
@@ -281,6 +370,28 @@ public class Master implements Watcher {
 
     void getAbsentWorkerTasks(String worker) {
         zk.getChildren("/assign/" + worker, false, workerAssignmentCallback, null);
+    }
+
+    void getTasks() {
+        zk.getChildren("/tasks", tasksChangeWatcher, tasksGetChildrenCallback, null);
+    }
+
+    void assignTasks(List<String> tasks) {
+        for (String task : tasks) {
+            getTaskData(task);
+        }
+    }
+
+    void getTaskData(String task) {
+        zk.getData("/tasks/" + task, false, taskDataCallback, task);
+    }
+
+    void createAssignment(String path, byte[] data) {
+        zk.create(path, data, OPEN_ACL_UNSAFE, PERSISTENT, assignTaskCallback, data);
+    }
+
+    void deleteTask(String name) {
+        zk.delete("/tasks/" + name, -1, taskDeleteCallback, null);
     }
 
     public static void main(String[] args) throws Exception {
