@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.Random;
 
+import static org.apache.zookeeper.AsyncCallback.StatCallback;
 import static org.apache.zookeeper.AsyncCallback.DataCallback;
 import static org.apache.zookeeper.AsyncCallback.StringCallback;
 import static org.apache.zookeeper.CreateMode.EPHEMERAL;
@@ -27,6 +28,21 @@ public class Master implements Watcher {
     String serverId;
     boolean connected;
     boolean expired;
+    private volatile MasterStates state;
+
+    /*
+     * A master process can be either running for
+     * primary master, elected primary master, or
+     * not elected, in which case it is a backup
+     * master.
+     */
+    enum MasterStates {
+        RUNNING,
+        ELECTED,
+        NOTELECTED
+    }
+
+    // callbacks
 
     StringCallback masterCreateCallback = new StringCallback() {
         @Override
@@ -36,12 +52,42 @@ public class Master implements Watcher {
                     checkMaster();
                     break;
                 case OK:
-                    isLeader = true;
+//                    isLeader = true;
+                    state = MasterStates.ELECTED;
+                    takeLeadership();
+                    break;
+                case NODEEXISTS:
+                    state = MasterStates.NOTELECTED;
+                    masterExists();
                     break;
                 default:
-                    isLeader = false;
+//                    isLeader = false;
+                    state = MasterStates.NOTELECTED;
+                    LOGGER.error("Error while running for master.", KeeperException.create(Code.get(rc), path));
+                    break;
             }
             LOGGER.info("I'm " + (isLeader ? "" : "not ") + "the leader");
+        }
+    };
+
+    StatCallback masterExistsCallback = new StatCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, Stat stat) {
+            switch (Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    masterExists();
+                    break;
+                case OK:
+                    break;
+                case NONODE:
+                    state = MasterStates.RUNNING;
+                    runForMaster();
+                    LOGGER.info("Previous master was deleted. Run for master again.");
+                    break;
+                default:
+                    checkMaster();
+                    break;
+            }
         }
     };
 
@@ -80,12 +126,25 @@ public class Master implements Watcher {
         }
     };
 
+    // watchers
+
+    Watcher masterExistsWatcher = new Watcher() {
+        @Override
+        public void process(WatchedEvent e) {
+            if (e.getType() == Event.EventType.NodeDeleted) {
+                assert MASTER_PATH.equals(e.getPath());
+                runForMaster();
+            }
+        }
+    };
+
     Master(String hostPort) {
         this.hostPort = hostPort;
         this.serverId = Long.toString(new Random().nextLong());
-        this.isLeader = false;
         this.connected = false;
         this.expired = false;
+        this.state = MasterStates.RUNNING;
+        isLeader = false;
     }
 
     void bootstrap() {
@@ -134,6 +193,14 @@ public class Master implements Watcher {
 
     void runForMaster() {
         zk.create(MASTER_PATH, serverId.getBytes(), OPEN_ACL_UNSAFE, EPHEMERAL, masterCreateCallback, null);
+    }
+
+    void masterExists() {
+        zk.exists(MASTER_PATH, masterExistsWatcher, masterExistsCallback, null);
+    }
+
+    void takeLeadership() {
+        LOGGER.info("Taking leadership.");
     }
 
     boolean isConnected() {
