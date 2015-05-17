@@ -95,6 +95,9 @@ public class Worker implements Watcher {
     public static void main(String[] args) throws Exception {
         Worker w = new Worker(args[0]);
         w.startZk();
+        w.register();
+
+        Thread.sleep(100000);
     }
 
 }

@@ -25,6 +25,8 @@ public class Master implements Watcher {
     ZooKeeper zk;
     String hostPort;
     String serverId;
+    boolean connected;
+    boolean expired;
 
     StringCallback masterCreateCallback = new StringCallback() {
         @Override
@@ -82,6 +84,8 @@ public class Master implements Watcher {
         this.hostPort = hostPort;
         this.serverId = Long.toString(new Random().nextLong());
         this.isLeader = false;
+        this.connected = false;
+        this.expired = false;
     }
 
     void bootstrap() {
@@ -96,7 +100,7 @@ public class Master implements Watcher {
     }
 
     void startZk() throws IOException {
-        zk = new ZooKeeper(hostPort, 15000, this);
+        zk = new ZooKeeper(hostPort, 150000, this);
     }
 
     void stopZk() throws InterruptedException {
@@ -105,6 +109,23 @@ public class Master implements Watcher {
 
     public void process(WatchedEvent e) {
         LOGGER.info("Process: " + e);
+        if (e.getType() == Event.EventType.None) {
+            switch(e.getState()) {
+                case SyncConnected:
+                    connected = true;
+                    break;
+                case Disconnected:
+                    connected = false;
+                    break;
+                case Expired:
+                    expired = true;
+                    connected = false;
+                    LOGGER.error("session expired");
+                    break;
+                default:
+                    break;
+            }
+        }
     }
 
     private void checkMaster() {
@@ -115,10 +136,29 @@ public class Master implements Watcher {
         zk.create(MASTER_PATH, serverId.getBytes(), OPEN_ACL_UNSAFE, EPHEMERAL, masterCreateCallback, null);
     }
 
+    boolean isConnected() {
+        return connected;
+    }
+
+    boolean isExpired() {
+        return expired;
+    }
+
     public static void main(String[] args) throws Exception {
         Master m = new Master(args[0]);
         m.startZk();
-        // TODO implement async state tests
+
+        while(!m.isConnected()) {
+            Thread.sleep(100);
+        }
+
+        m.bootstrap();
+        m.runForMaster();
+
+        while(!m.isExpired()) {
+            Thread.sleep(1000);
+        }
+
         m.stopZk();
     }
 
