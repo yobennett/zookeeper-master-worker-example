@@ -12,6 +12,7 @@ import java.util.Random;
 import static org.apache.zookeeper.AsyncCallback.DataCallback;
 import static org.apache.zookeeper.AsyncCallback.StringCallback;
 import static org.apache.zookeeper.CreateMode.EPHEMERAL;
+import static org.apache.zookeeper.CreateMode.PERSISTENT;
 import static org.apache.zookeeper.KeeperException.*;
 import static org.apache.zookeeper.ZooDefs.Ids.OPEN_ACL_UNSAFE;
 
@@ -58,10 +59,40 @@ public class Master implements Watcher {
         }
     };
 
+    StringCallback createParentCallback = new StringCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, String name) {
+            switch(Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    createParent(path, (byte[]) ctx);
+                    break;
+                case OK:
+                    LOGGER.info("Parent created: " + path);
+                    break;
+                case NODEEXISTS:
+                    LOGGER.warn("Parent already registered: " + path);
+                    break;
+                default:
+                    LOGGER.error("Error creating parent: " + path + ".", KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };
+
     Master(String hostPort) {
         this.hostPort = hostPort;
         this.serverId = Long.toString(new Random().nextLong());
         this.isLeader = false;
+    }
+
+    void bootstrap() {
+        createParent("/workers", new byte[0]);
+        createParent("/assign", new byte[0]);
+        createParent("/tasks", new byte[0]);
+        createParent("/status", new byte[0]);
+    }
+
+    void createParent(String path, byte[] data) {
+        zk.create(path, data, OPEN_ACL_UNSAFE, PERSISTENT, createParentCallback, data);
     }
 
     void startZk() throws IOException {
@@ -73,7 +104,7 @@ public class Master implements Watcher {
     }
 
     public void process(WatchedEvent e) {
-        System.out.println(e);
+        LOGGER.info("Process: " + e);
     }
 
     private void checkMaster() {
