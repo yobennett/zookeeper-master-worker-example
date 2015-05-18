@@ -81,6 +81,33 @@ public class Worker implements Watcher, Closeable {
         this.assignedTasksCache = new ChildrenCache();
     }
 
+    void bootstrap() {
+        createAssignNode();
+    }
+
+    void createAssignNode() {
+        zk.create("/assign/" + name, new byte[0], OPEN_ACL_UNSAFE, PERSISTENT, createAssignCallback, null);
+    }
+
+    StringCallback createAssignCallback = new StringCallback() {
+        @Override
+        public void processResult(int rc, String path, Object ctx, String name) {
+            switch (Code.get(rc)) {
+                case CONNECTIONLOSS:
+                    createAssignNode();
+                    break;
+                case OK:
+                    LOGGER.info("Created assign node.");
+                    break;
+                case NODEEXISTS:
+                    LOGGER.warn("Already created assign node.");
+                    break;
+                default:
+                    LOGGER.error("Error creating assign node: " + path + ".", KeeperException.create(Code.get(rc), path));
+            }
+        }
+    };
+
     void start() throws IOException {
         zk = new ZooKeeper(hostPort, 15000, this);
     }
@@ -240,8 +267,9 @@ public class Worker implements Watcher, Closeable {
     public static void main(String[] args) throws Exception {
         Worker w = new Worker(args[0]);
         w.start();
+        w.bootstrap();
         w.register();
-
+        w.getTasks();
         Thread.sleep(100000);
     }
 
