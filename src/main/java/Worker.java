@@ -36,6 +36,8 @@ public class Worker implements Watcher, Closeable {
     String status;
     String name;
     Executor executor;
+    private volatile boolean connected;
+    private volatile boolean expired;
     protected ChildrenCache assignedTasksCache;
 
     StringCallback createWorkerCallback = new StringCallback() {
@@ -71,6 +73,8 @@ public class Worker implements Watcher, Closeable {
         this.hostPort = hostPort;
         this.serverId = Long.toString(new Random().nextLong());
         this.name = "worker" + "-" + serverId;
+        this.connected = false;
+        this.expired = false;
         this.executor = new ThreadPoolExecutor(
                 1,
                 1,
@@ -124,6 +128,23 @@ public class Worker implements Watcher, Closeable {
 
     public void process(WatchedEvent e) {
         LOGGER.info("Process: " + e + ", " + hostPort);
+        if (e.getType() == Event.EventType.None) {
+            switch(e.getState()) {
+                case SyncConnected:
+                    connected = true;
+                    break;
+                case Disconnected:
+                    connected = false;
+                    break;
+                case Expired:
+                    expired = true;
+                    connected = false;
+                    LOGGER.error("session expired");
+                    break;
+                default:
+                    break;
+            }
+        }
     }
 
     void register() {
@@ -264,13 +285,30 @@ public class Worker implements Watcher, Closeable {
         }
     };
 
+    boolean isConnected() {
+        return connected;
+    }
+
+    boolean isExpired() {
+        return expired;
+    }
+
     public static void main(String[] args) throws Exception {
         Worker w = new Worker(args[0]);
         w.start();
+
+        while (!w.isConnected()) {
+            Thread.sleep(100);
+        }
+
         w.bootstrap();
         w.register();
         w.getTasks();
-        Thread.sleep(100000);
+
+        while (!w.isExpired()) {
+            Thread.sleep(100000);
+        }
+
     }
 
 }
